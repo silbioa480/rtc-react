@@ -1,155 +1,194 @@
-let localVideo = document.getElementById("localVideo");
-let remoteVideo = document.getElementById("remoteVideo");
-let isInitiator = false;
-let isChannelReady = false;
-let isStarted = false;
-let localStream;
-let remoteStream;
-let pc;
+var isChannelReady = false;
+var isInitiator = false;
+var isStarted = false;
+var localStream;
+var pc;
+var remoteStream;
 
-let pcConfig = {
-  iceServers: [
-    {
-      urls: "stun:stun.l.google.com:19302",
-    },
-  ],
+const socket = io.connect();
+
+var remoteVideo = document.getElementById('localVideo');
+var localVideo = document.getElementById('remoteVideo');
+
+var pcConfig = {
+  'iceServers': [{
+    urls: 'stun:stun.l.google.com:19302'
+  },
+    {urls: "turn:numb.viagenie.ca",
+      credential: "muazkh",
+      username: "webrtc@live.com"}
+  ]};
+
+var sdpConstraints = {
+  offerToReceiveAudio: true,
+  offerToReceiveVideo: true
 };
 
-let room = "foo";
+localVideo.addEventListener("loadedmetadata", function () {
+  console.log('left: gotStream with width and height:', localVideo.videoWidth, localVideo.videoHeight);
+});
 
-let socket = io.connect();
+remoteVideo.addEventListener("loadedmetadata", function () {
+  console.log('right: gotStream with width and height:', remoteVideo.videoWidth, remoteVideo.videoHeight);
+});
 
-if (room !== "") {
-  socket.emit("create or join", room);
-  console.log("Attempted to create or join Room", room);
-}
+remoteVideo.addEventListener('resize', () => {
+  console.log(`Remote video size changed to ${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`);
+});
 
-socket.on("created", (room, id) => {
-  console.log("Created room" + room + "socket ID : " + id);
+socket.on('connect', function () {
+  socket.emit("onCollabo", socket.id);
+});
+
+socket.on('collabo', function (room) {
+  socket.emit('create or join', room);
+  console.log('Attempted to create or  join room', room);
+});
+
+
+socket.on('created', function (room) {
+  console.log('Created room ' + room);
   isInitiator = true;
 });
 
-socket.on("full", (room) => {
-  console.log("Room " + room + "is full");
+socket.on('full', function (room) {
+  console.log('Room ' + room + ' is full');
 });
 
-socket.on("join", (room) => {
-  console.log("Another peer made a request to join room" + room);
-  console.log("This peer is the initiator of room" + room + "!");
+socket.on('join', function (room) {
+  console.log('Another peer made a request to join room ' + room);
+  console.log('This peer is the initiator of room ' + room + '!');
   isChannelReady = true;
 });
 
-socket.on("joined", (room) => {
-  console.log("joined : " + room);
+socket.on('joined', function (room) {
+  console.log('joined: ' + room);
   isChannelReady = true;
 });
-socket.on("log", (array) => {
+
+socket.on('log', function (array) {
   console.log.apply(console, array);
 });
 
-socket.on("message", (message) => {
-  console.log("Client received message :", message);
-  if (message === "got user media") {
+function sendMessage(message) {
+  console.log('Client sending message: ', message);
+  socket.emit('message', message);
+}
+
+// This client receives a message
+socket.on('message', function (message) {
+  console.log('Client received message:', message);
+  if (message === 'got user media') {
     maybeStart();
-  } else if (message.type === "offer") {
+  } else if (message.type === 'offer') {
     if (!isInitiator && !isStarted) {
       maybeStart();
     }
     pc.setRemoteDescription(new RTCSessionDescription(message));
     doAnswer();
-  } else if (message.type === "answer" && isStarted) {
+  } else if (message.type === 'answer' && isStarted) {
     pc.setRemoteDescription(new RTCSessionDescription(message));
-  } else if (message.type === "candidate" && isStarted) {
-    const candidate = new RTCIceCandidate({
+  } else if (message.type === 'candidate' && isStarted) {
+    var candidate = new RTCIceCandidate({
       sdpMLineIndex: message.label,
-      candidate: message.candidate,
+      candidate: message.candidate
     });
-
     pc.addIceCandidate(candidate);
+  } else if (message === 'bye' && isStarted) {
+    handleRemoteHangup();
   }
 });
-function sendMessage(message) {
-  console.log("Client sending message: ", message);
-  socket.emit("message", message);
-}
 
-navigator.mediaDevices
-  .getUserMedia({
-    video: true,
-    audio: false,
-  })
+navigator.mediaDevices.getUserMedia({
+  audio: false,
+  video: true
+})
   .then(gotStream)
-  .catch((error) => console.error(error));
+  .catch(function (e) {
+    alert('getUserMedia() error: ' + e.name);
+  });
 
 function gotStream(stream) {
-  console.log("Adding local stream");
+  console.log('Adding local stream.');
   localStream = stream;
   localVideo.srcObject = stream;
-  sendMessage("got user media");
+  sendMessage('got user media');
   if (isInitiator) {
     maybeStart();
   }
 }
 
+var constraints = {
+  video: true
+};
+
+console.log('Getting user media with constraints', constraints);
+
+if (location.hostname !== 'localhost') {
+  requestTurn(
+    "stun:stun.l.google.com:19302"
+  );
+}
+
+function maybeStart() {
+  console.log('>>>>>>> maybeStart() ', isStarted, localStream, isChannelReady);
+  if (!isStarted && typeof localStream !== 'undefined' && isChannelReady) {
+    console.log('>>>>>> creating peer connection');
+    createPeerConnection();
+    pc.addStream(localStream);
+    isStarted = true;
+    console.log('isInitiator', isInitiator);
+    if (isInitiator) {
+      doCall();
+    }
+  }
+}
+
+window.onbeforeunload = function () {
+  sendMessage('bye');
+};
+
+/////////////////////////////////////////////////////////
+
 function createPeerConnection() {
   try {
-    pc = new RTCPeerConnection(null);
+    pc = new RTCPeerConnection(pcConfig);
     pc.onicecandidate = handleIceCandidate;
     pc.onaddstream = handleRemoteStreamAdded;
-    console.log("Created RTCPeerConnection");
+    pc.onremovestream = handleRemoteStreamRemoved;
+    console.log('Created RTCPeerConnnection');
   } catch (e) {
-    alert("cannot create RTCPeerConnection object");
+    console.log('Failed to create PeerConnection, exception: ' + e.message);
+    alert('Cannot create RTCPeerConnection object.');
     return;
   }
 }
 
 function handleIceCandidate(event) {
-  console.log("iceCandidateEvent", event);
+  console.log('icecandidate event: ', event);
   if (event.candidate) {
     sendMessage({
-      type: "candidate",
+      type: 'candidate',
       label: event.candidate.sdpMLineIndex,
       id: event.candidate.sdpMid,
-      candidate: event.candidate.candidate,
+      candidate: event.candidate.candidate
     });
   } else {
-    console.log("end of candidates");
+    console.log('End of candidates.');
   }
 }
 
 function handleCreateOfferError(event) {
-  console.log("createOffer() error: ", event);
-}
-
-function handleRemoteStreamAdded(event) {
-  console.log("remote stream added");
-  remoteStream = event.stream;
-  remoteVideo.srcObject = remoteStream;
-}
-
-function maybeStart() {
-  console.log(">>MaybeStart() : ", isStarted, localStream, isChannelReady);
-  if (!isStarted && typeof localStream !== "undefined" && isChannelReady) {
-    console.log(">>>>> creating peer connection");
-    createPeerConnection();
-    pc.addStream(localStream);
-    isStarted = true;
-    console.log("isInitiator : ", isInitiator);
-    if (isInitiator) {
-      doCall();
-    }
-  } else {
-    console.error("maybeStart not Started!");
-  }
+  console.log('createOffer() error: ', event);
 }
 
 function doCall() {
-  console.log("Sending offer to peer");
+  console.log('Sending offer to peer');
   pc.createOffer(setLocalAndSendMessage, handleCreateOfferError);
 }
 
 function doAnswer() {
-  console.log("Sending answer to peer");
+  console.log('Sending answer to peer.');
   pc.createAnswer().then(
     setLocalAndSendMessage,
     onCreateSessionDescriptionError
@@ -158,9 +197,71 @@ function doAnswer() {
 
 function setLocalAndSendMessage(sessionDescription) {
   pc.setLocalDescription(sessionDescription);
+  console.log('setLocalAndSendMessage sending message', sessionDescription);
   sendMessage(sessionDescription);
 }
 
 function onCreateSessionDescriptionError(error) {
-  console.error("Failed to create session Description", error);
+  trace('Failed to create session description: ' + error.toString());
+}
+
+/*turn 서버 요청 CORS 문제 발생*/
+function requestTurn(turnURL) {
+  var turnExists = true;
+  // for (var i in pcConfig.iceServers) {
+  //     if (pcConfig.iceServers[i].urls.substr(0, 5) === 'stun:') {
+  //         turnExists = true;
+  //         turnReady = true;
+  //         console.log("Exist stun server");
+  //         break;
+  //     }
+  // }
+  if (!turnExists) {
+    // console.log('Getting TURN server from ', turnURL);
+    // // No TURN server. Get one from computeengineondemand.appspot.com:
+    // var xhr = new XMLHttpRequest();
+    // xhr.onreadystatechange = function() {
+    //     if (xhr.readyState === 4 && xhr.status === 200) {
+    //         var turnServer = JSON.parse(xhr.responseText);
+    //         console.log('Got TURN server: ', turnServer);
+    //         pcConfig.iceServers.push({
+    //             'urls': 'turn:' + turnServer.username + '@' + turnServer.turn,
+    //             'credential': turnServer.password
+    //         });
+    //         turnReady = true;
+    //     }
+    // };
+    //
+    // xhr.open('GET', turnURL, true);
+    // xhr.send();
+  }
+}
+
+function handleRemoteStreamAdded(event) {
+  console.log('Remote stream added.');
+  remoteStream = event.stream;
+  console.log(event);
+  remoteVideo.srcObject = remoteStream;
+}
+
+function handleRemoteStreamRemoved(event) {
+  console.log('Remote stream removed. Event: ', event);
+}
+
+function hangup() {
+  console.log('Hanging up.');
+  stop();
+  sendMessage('bye');
+}
+
+function handleRemoteHangup() {
+  console.log('Session terminated.');
+  stop();
+  isInitiator = false;
+}
+
+function stop() {
+  isStarted = false;
+  pc.close();
+  pc = null;
 }
